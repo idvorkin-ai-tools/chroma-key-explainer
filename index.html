@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chroma-key hill-climbing — clean transparent backgrounds via alpha-mask evals</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 960px; margin: 2rem auto; padding: 0 1rem; color: #222; line-height: 1.5; }
+  h1 { border-bottom: 2px solid #333; padding-bottom: .3rem; }
+  h2 { margin-top: 2.5rem; color: #444; }
+  h3 { margin-top: 1.5rem; color: #555; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { background: #f4f4f4; padding: .08rem .3rem; border-radius: 3px; font-size: .9em; }
+  pre { background: #1b1b1b; color: #e8e8e8; padding: 1rem; border-radius: 6px; overflow-x: auto; font-size: .82em; line-height: 1.35; }
+  pre code { background: transparent; color: inherit; padding: 0; }
+  .meta { background: #f4f4f4; padding: .8rem 1rem; border-radius: 6px; font-size: .92em; margin: 1rem 0; }
+  .aha { background: #fff8d6; border-left: 4px solid #c0a02e; padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+  .tldr { background: #eaf3ff; border-left: 4px solid #0969da; padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+  .problem { background: #fbe9e7; border-left: 4px solid #c92a2a; padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+  .win { background: #e8f5e9; border-left: 4px solid #2e7d32; padding: .8rem 1rem; border-radius: 0 6px 6px 0; margin: 1rem 0; }
+  a { color: #0969da; }
+  hr { border: none; border-top: 1px solid #e4e4e4; margin: 2.5rem 0; }
+
+  table.metrics { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: .9em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  table.metrics th { background: #f4f4f4; text-align: left; padding: .5rem .7rem; border-bottom: 1px solid #ddd; }
+  table.metrics td { padding: .4rem .7rem; border-bottom: 1px solid #eee; text-align: right; }
+  table.metrics td:first-child, table.metrics th:first-child { text-align: left; }
+  table.metrics tr.winner { background: #e8f5e9; font-weight: 600; }
+  table.metrics tr.worst { color: #b00; }
+
+  .compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: .8rem; margin: 1rem 0; }
+  .compare figure { margin: 0; border: 1px solid #e4e4e4; border-radius: 6px; padding: .5rem; background: #fafafa; }
+  .compare figure.alpha { background: #333; border-color: #333; }
+  .compare figure.alpha figcaption { color: #ccc; }
+  .compare img { width: 100%; height: auto; display: block; border-radius: 3px; }
+  .compare figcaption { font-size: .82em; color: #666; margin-top: .4rem; text-align: center; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .approach { margin: 2rem 0; padding: 1rem 1.2rem; border: 1px solid #e4e4e4; border-radius: 8px; background: #fff; }
+  .approach h3 { margin-top: 0; }
+  .approach .cmd { background: #1b1b1b; color: #e8e8e8; padding: .6rem .8rem; border-radius: 4px; font-size: .82em; overflow-x: auto; margin: .5rem 0 1rem; }
+  .approach .verdict { font-style: italic; color: #444; }
+
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #e4e4e4; color: #777; font-size: .85em; text-align: center; }
+  footer a { color: #0969da; }
+</style>
+</head>
+<body>
+
+<h1>Chroma-key hill-climbing</h1>
+
+<div class="meta">
+  <strong>What this is:</strong> a worked example of
+  <em>eval-driven hill-climbing</em> — iterating on a real image-processing
+  problem (pulling clean transparent backgrounds out of AI-generated
+  character art) by treating each <code>magick</code> incantation as a
+  &ldquo;model&rdquo;, the alpha mask it produces as the output, and a few
+  cheap numerical metrics as the fitness function. Six approaches, two
+  test images, one winning one-liner.
+  <br>
+  <strong>Repo:</strong>
+  <a href="https://github.com/idvorkin-ai-tools/chroma-key-explainer">github.com/idvorkin-ai-tools/chroma-key-explainer</a>
+  &middot;
+  <strong>Harness:</strong>
+  <a href="https://github.com/idvorkin-ai-tools/chroma-key-explainer/blob/main/scripts/harness.sh"><code>scripts/harness.sh</code></a>
+</div>
+
+<div class="tldr">
+  <strong>TL;DR.</strong> If you chroma-key by eyeballing the result on a
+  white page, you will ship broken images. Magenta-tinted highlights inside
+  a character get eaten by aggressive fuzz, and interior pockets between
+  characters stay fully opaque &mdash; both invisible at a glance. You only
+  see the damage when you pull the <strong>alpha channel out as a grayscale
+  image</strong> and measure it. Once you have a fitness function
+  (<code>holes</code>, <code>residual&nbsp;magenta</code>,
+  <code>edge&nbsp;fringe</code>), the search is easy. The winner was a
+  two-stage <code>flood4 &rarr; fuzz-3% -transparent</code> pipeline that
+  scored best under <code>residual &times; 5 + holes</code> across both
+  sparse and dense compositions.
+</div>
+
+<h2>What are evals?</h2>
+
+<p>In the LLM world, an <strong>eval</strong> is a quantitative quality
+metric run against a model&rsquo;s output. Borrow that vocabulary here and
+the pieces line up cleanly:</p>
+
+<ul>
+  <li>The <strong>&ldquo;model&rdquo;</strong> is whichever ImageMagick
+  recipe you&rsquo;re currently trying.</li>
+  <li>The <strong>&ldquo;output&rdquo;</strong> is the resulting RGBA image
+  &mdash; specifically its alpha channel.</li>
+  <li>The <strong>eval scores</strong> are cheap pixel counts:
+  <em>how many interior holes did the chroma eat?</em>,
+  <em>how much magenta did it miss?</em>,
+  <em>how fringed are the edges?</em></li>
+</ul>
+
+<p>With those three numbers in hand, iterating is just hill-climbing: try a
+variant, measure, keep the one that moves your metric in the right
+direction, repeat. No visual judgment required at the inner loop.</p>
+
+<h2>Why do we need evals?</h2>
+
+<p>Because eyeballing fails silently. An image that <em>looks</em> cleanly
+keyed on a light page can be riddled with defects your eye can&rsquo;t see
+&mdash; transparent pixels render <em>as whatever&rsquo;s behind them</em>,
+so holes in fur look like fur on a white background. Extracting the alpha
+channel as a grayscale PNG is the ground truth; a perfectly keyed image has
+a solid-white subject silhouette on solid black. Anything else is a
+defect.</p>
+
+<p>Here are the two test cases used throughout this page &mdash; a raccoon
+character rendered by an AI image generator on its standard magenta
+background. Same character, two compositions. They fail differently:</p>
+
+<div class="compare">
+  <figure><img src="test_images/case-sparse.webp" alt="Case A: single raccoon on magenta background, sparse composition"><figcaption>case-sparse: single SOLO raccoon</figcaption></figure>
+  <figure><img src="test_images/case-dense.webp" alt="Case B: three raccoons tightly packed on magenta background, dense composition"><figcaption>case-dense: trio, packed tight</figcaption></figure>
+</div>
+
+<h3>Case A &mdash; sparse: &ldquo;looks fine&rdquo; is a lie</h3>
+
+<p>Naive chroma-key on the sparse case looks completely clean on a light
+background. The raccoon&rsquo;s silhouette sits cleanly on white; nothing
+jumps out. But pull the alpha channel and you see the damage: thousands of
+interior holes where magenta-tinted highlights on the fur got killed by the
+30% fuzz.</p>
+
+<div class="compare">
+  <figure><img src="results/sparse/plain-on-white.webp" alt="Plain chroma output rendered on white background — looks clean"><figcaption>composite on white: looks clean</figcaption></figure>
+  <figure class="alpha"><img src="results/sparse/plain-alpha.png" alt="Alpha mask of the plain chroma output — visible black speckle inside the raccoon where fur highlights were eaten"><figcaption>alpha mask: 7,698 interior holes</figcaption></figure>
+</div>
+
+<p>Without the alpha extraction, you&rsquo;d ship this. Every hole becomes
+a background-colored pinhole when the image gets composited onto some other
+backdrop (a blog post, a dark theme, a newsletter template).</p>
+
+<h3>Case B &mdash; dense: a different failure mode</h3>
+
+<p>The dense composition fails two ways. Same fur-highlight holes as case A,
+<em>plus</em> large interior pockets of magenta trapped between the
+characters&rsquo; legs and bodies &mdash; fully opaque regions of
+background-color that a plain <code>-fuzz 30% -transparent</code> kills
+cleanly, but which leave huge black-fur-colored gaps when fuzz is
+restrained to preserve interior highlights.</p>
+
+<div class="compare">
+  <figure><img src="results/dense/plain-on-white.webp" alt="Plain chroma output on dense case, rendered on white"><figcaption>composite on white: looks clean</figcaption></figure>
+  <figure class="alpha"><img src="results/dense/plain-alpha.png" alt="Alpha mask of plain chroma on dense case — more holes, including between characters"><figcaption>alpha mask: 9,687 interior holes</figcaption></figure>
+</div>
+
+<p>Crucially, the two cases don&rsquo;t respond to the same fix. An
+approach that aces case A (leaves the interior untouched) will fail case B
+(leaves magenta pockets between characters), and vice-versa. Without evals
+on <em>both</em> images, you&rsquo;d tune on one and regress the other
+without noticing. That&rsquo;s the whole point: evals surface the failure
+mode a single eyeball on a single image won&rsquo;t.</p>
+
+<h2>The eval script</h2>
+
+<p>The whole scoring pipeline is
+<a href="https://github.com/idvorkin-ai-tools/chroma-key-explainer/blob/main/scripts/eval.py"><code>scripts/eval.py</code></a>,
+~50 lines. Given any RGBA image it computes:</p>
+
+<ul>
+  <li><code>residual_magenta_px</code> &mdash; opaque pixels still near
+  <code>#FF00FF</code>. Missed background.</li>
+  <li><code>interior_hole_px</code> &mdash; transparent pixels enclosed by
+  opaque. Eaten interior.</li>
+  <li><code>edge_fringe_px</code> &mdash; partial-alpha pixels. Incomplete
+  edges.</li>
+  <li><code>opaque_px</code> &mdash; rough subject coverage, for
+  regression-checking.</li>
+  <li><code>alpha_binarity_pct</code> &mdash; percentage of pixels fully
+  opaque or fully transparent.</li>
+</ul>
+
+<p>The interior-hole computation is a connected-components scan: label every
+transparent region, mark the labels that touch the image border as
+background, and the rest are holes.</p>
+
+<h2>The hill-climb</h2>
+
+<p>Six approaches, in the order they were tried. Each one reacts to what
+the previous one&rsquo;s eval revealed.</p>
+
+<!-- ============================================================= -->
+<div class="approach">
+  <h3>1. <code>plain</code> &mdash; one-shot fuzzy chroma</h3>
+  <pre class="cmd"><code>magick input.webp -fuzz 30% -transparent "#FF00FF" out.webp</code></pre>
+
+  <p>The textbook one-liner. 30% fuzz because AI-generator output is never
+  pure <code>#FF00FF</code> &mdash; there&rsquo;s colour bleed near edges,
+  JPEG/WebP noise, and anti-aliasing. Zero fuzz leaves a halo.</p>
+
+  <table class="metrics">
+    <tr><th>case</th><th>holes</th><th>residual</th><th>fringe</th><th>score</th></tr>
+    <tr class="worst"><td>sparse</td><td>7,698</td><td>0</td><td>0</td><td>7,698</td></tr>
+    <tr class="worst"><td>dense</td><td>9,687</td><td>0</td><td>0</td><td>9,687</td></tr>
+  </table>
+
+  <div class="compare">
+    <figure><img src="results/sparse/plain-on-white.webp" alt="sparse plain on white"><figcaption>sparse / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/plain-alpha.png" alt="sparse plain alpha"><figcaption>sparse / alpha</figcaption></figure>
+    <figure><img src="results/dense/plain-on-white.webp" alt="dense plain on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/dense/plain-alpha.png" alt="dense plain alpha"><figcaption>dense / alpha</figcaption></figure>
+  </div>
+
+  <p class="verdict"><strong>What the eval says:</strong> zero residual
+  magenta (aggressive fuzz killed every bg pixel) but 7.7k&ndash;9.7k
+  interior holes. The same fuzz tolerance that removes the background also
+  removes any magenta-tinted pixel inside the subject.
+  <br>
+  <strong>Next:</strong> stop chroma-keying interior pixels at all. Only
+  remove background that&rsquo;s actually connected to the image edge.</p>
+</div>
+
+<!-- ============================================================= -->
+<div class="approach">
+  <h3>2. <code>flood4</code> &mdash; flood-fill from the four corners</h3>
+  <pre class="cmd"><code>magick input.webp -alpha set -fuzz 30% -fill none \
+  -draw "color 0,0 floodfill"     -draw "color W-1,0 floodfill" \
+  -draw "color 0,H-1 floodfill"   -draw "color W-1,H-1 floodfill" \
+  out.webp</code></pre>
+
+  <p>Topological fix: use flood-fill from the corners to mark only
+  <em>reachable</em> magenta as background. Interior magenta-tinted pixels
+  can&rsquo;t be reached through a wall of opaque fur, so they survive.</p>
+
+  <table class="metrics">
+    <tr class="winner"><td>sparse</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+    <tr><td>dense</td><td>0</td><td>132</td><td>0</td><td>660</td></tr>
+  </table>
+
+  <div class="compare">
+    <figure><img src="results/sparse/flood4-on-white.webp" alt="sparse flood4 on white"><figcaption>sparse / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/flood4-alpha.png" alt="sparse flood4 alpha"><figcaption>sparse / alpha</figcaption></figure>
+    <figure><img src="results/dense/flood4-on-white.webp" alt="dense flood4 on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/dense/flood4-alpha.png" alt="dense flood4 alpha"><figcaption>dense / alpha</figcaption></figure>
+  </div>
+
+  <p class="verdict"><strong>What the eval says:</strong> holes go to zero
+  on both cases &mdash; topology solved. But dense now has 132 residual
+  magenta pixels: interior pockets of background trapped between the three
+  bodies. Flood-fill can&rsquo;t reach them from the corners because the
+  characters form a closed ring.
+  <br>
+  <strong>Next:</strong> clean up those interior pockets with a second,
+  <em>tight</em> chroma pass &mdash; low fuzz so it kills pure magenta but
+  not tinted fur.</p>
+</div>
+
+<!-- ============================================================= -->
+<div class="approach">
+  <h3>3. <code>flood4 + tight 3%</code></h3>
+  <pre class="cmd"><code>magick tmp.webp -fuzz 3% -transparent "#FF00FF" out.webp</code></pre>
+
+  <p>After flood4, apply a second chroma pass with a very tight fuzz
+  tolerance. 3% is small enough to leave tinted pixels alone.</p>
+
+  <table class="metrics">
+    <tr class="winner"><td>sparse</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+    <tr class="winner"><td>dense</td><td>84</td><td>37</td><td>0</td><td>269</td></tr>
+  </table>
+
+  <div class="compare">
+    <figure><img src="results/sparse/flood4_then_tight_3-on-white.webp" alt="sparse f+t3 on white"><figcaption>sparse / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/flood4_then_tight_3-alpha.png" alt="sparse f+t3 alpha"><figcaption>sparse / alpha</figcaption></figure>
+    <figure><img src="results/dense/flood4_then_tight_3-on-white.webp" alt="dense f+t3 on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/dense/flood4_then_tight_3-alpha.png" alt="dense f+t3 alpha"><figcaption>dense / alpha</figcaption></figure>
+  </div>
+
+  <p class="verdict"><strong>What the eval says:</strong> residual magenta
+  drops from 132&nbsp;&rarr;&nbsp;37 on dense, at the cost of 84 new
+  interior holes (tight pass caught a few almost-pure magenta highlight
+  pixels). Best <code>residual&times;5&nbsp;+&nbsp;holes</code> score so
+  far: 269 on dense, 0 on sparse.
+  <br>
+  <strong>Next:</strong> nudge the tight fuzz up to see if we can drive
+  residual to zero without paying too much in holes.</p>
+</div>
+
+<!-- ============================================================= -->
+<div class="approach">
+  <h3>4. <code>flood4 + tight 5%</code></h3>
+  <pre class="cmd"><code>magick tmp.webp -fuzz 5% -transparent "#FF00FF" out.webp</code></pre>
+
+  <p>Same strategy, slightly looser second pass.</p>
+
+  <table class="metrics">
+    <tr class="winner"><td>sparse</td><td>0</td><td>0</td><td>0</td><td>0</td></tr>
+    <tr><td>dense</td><td>270</td><td>0</td><td>0</td><td>270</td></tr>
+  </table>
+
+  <div class="compare">
+    <figure><img src="results/sparse/flood4_then_tight_5-on-white.webp" alt="sparse f+t5 on white"><figcaption>sparse / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/flood4_then_tight_5-alpha.png" alt="sparse f+t5 alpha"><figcaption>sparse / alpha</figcaption></figure>
+    <figure><img src="results/dense/flood4_then_tight_5-on-white.webp" alt="dense f+t5 on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/dense/flood4_then_tight_5-alpha.png" alt="dense f+t5 alpha"><figcaption>dense / alpha</figcaption></figure>
+  </div>
+
+  <p class="verdict"><strong>What the eval says:</strong> residual goes to
+  zero, but holes jump to 270. Score: 270 on dense &mdash; very close to
+  tight-3%, with the trade-off flipped.
+  <br>
+  <strong>Next:</strong> push harder, see if the trade keeps being
+  roughly even or whether the hole cost explodes.</p>
+</div>
+
+<!-- ============================================================= -->
+<div class="approach">
+  <h3>5. <code>flood4 + tight 10%</code></h3>
+  <pre class="cmd"><code>magick tmp.webp -fuzz 10% -transparent "#FF00FF" out.webp</code></pre>
+
+  <table class="metrics">
+    <tr><td>sparse</td><td>249</td><td>0</td><td>0</td><td>249</td></tr>
+    <tr><td>dense</td><td>1,077</td><td>0</td><td>0</td><td>1,077</td></tr>
+  </table>
+
+  <div class="compare">
+    <figure><img src="results/sparse/flood4_then_tight_10-on-white.webp" alt="sparse f+t10 on white"><figcaption>sparse / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/flood4_then_tight_10-alpha.png" alt="sparse f+t10 alpha"><figcaption>sparse / alpha</figcaption></figure>
+    <figure><img src="results/dense/flood4_then_tight_10-on-white.webp" alt="dense f+t10 on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/dense/flood4_then_tight_10-alpha.png" alt="dense f+t10 alpha"><figcaption>dense / alpha</figcaption></figure>
+  </div>
+
+  <p class="verdict"><strong>What the eval says:</strong> the hole cost
+  explodes. Sparse regresses from 0 to 249 (magenta-tinted highlights
+  inside the solo raccoon now get eaten); dense jumps to 1,077. We&rsquo;ve
+  gone past the optimum on the fuzz axis.
+  <br>
+  <strong>Next:</strong> try something structurally different &mdash;
+  connected-components on a binarised magenta mask &mdash; to see if a
+  different representation avoids the fuzz/hole trade-off entirely.</p>
+</div>
+
+<!-- ============================================================= -->
+<div class="approach">
+  <h3>6. <code>cc_border</code> &mdash; connected-components on a binary mask</h3>
+  <pre class="cmd"><code># Binarise magenta, then keep only the components touching the image edge.
+magick input.webp -fuzz 30% -fill white +opaque "#FF00FF" -fill black -opaque white mask.png
+magick mask.png   -fuzz 10% -fill red \
+  -draw "color 0,0 floodfill" -draw "color W-1,0 floodfill" \
+  -draw "color 0,H-1 floodfill" -draw "color W-1,H-1 floodfill" \
+  -channel R -separate -threshold 50% -negate alpha.png
+magick input.webp alpha.png -compose CopyOpacity -composite out.webp</code></pre>
+
+  <p>Structurally different approach: first reduce the image to a binary
+  magenta/non-magenta mask, then flood-fill <em>the mask</em> from the
+  corners. The resulting alpha is applied to the original image.</p>
+
+  <table class="metrics">
+    <tr class="worst"><td>sparse</td><td>7,698</td><td>0</td><td>0</td><td>7,698</td></tr>
+    <tr class="worst"><td>dense</td><td>9,686</td><td>0</td><td>0</td><td>9,686</td></tr>
+  </table>
+
+  <div class="compare">
+    <figure><img src="results/sparse/cc_border-on-white.webp" alt="sparse cc_border on white"><figcaption>sparse / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/cc_border-alpha.png" alt="sparse cc_border alpha"><figcaption>sparse / alpha</figcaption></figure>
+    <figure><img src="results/dense/cc_border-on-white.webp" alt="dense cc_border on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/dense/cc_border-alpha.png" alt="dense cc_border alpha"><figcaption>dense / alpha</figcaption></figure>
+  </div>
+
+  <p class="verdict"><strong>What the eval says:</strong> essentially
+  identical to <code>plain</code>. The binarisation step loses the same
+  interior highlight pixels that plain&rsquo;s aggressive fuzz did &mdash;
+  they flip to &ldquo;magenta&rdquo; in the binary mask and then get
+  labelled as background because the border-fill can reach them through
+  thin connecting pixels. More machinery, same failure mode.
+  <br>
+  <strong>Verdict:</strong> stop. The flood-fill-on-the-original-RGBA
+  approach (not on a binarised mask) is what does the real work.
+  <code>flood4 + tight 3%</code> is the winner.</p>
+</div>
+
+<h2>Results summary</h2>
+
+<p>Scored as <code>residual&nbsp;&times;&nbsp;5 + holes</code> (residual
+is visually worse than a small hole &mdash; a pixel of pure magenta in
+your subject is obvious; a single transparent pixel in fur is not), summed
+across sparse and dense:</p>
+
+<table class="metrics">
+  <tr><th>approach</th><th>sparse</th><th>dense</th><th>total</th></tr>
+  <tr class="worst"><td>plain</td><td>7,698</td><td>9,687</td><td>17,385</td></tr>
+  <tr><td>flood4</td><td>0</td><td>660</td><td>660</td></tr>
+  <tr class="winner"><td>flood4 + tight 3%</td><td>0</td><td>269</td><td>269</td></tr>
+  <tr><td>flood4 + tight 5%</td><td>0</td><td>270</td><td>270</td></tr>
+  <tr><td>flood4 + tight 10%</td><td>249</td><td>1,077</td><td>1,326</td></tr>
+  <tr class="worst"><td>cc_border</td><td>7,698</td><td>9,686</td><td>17,384</td></tr>
+</table>
+
+<div class="win">
+  <strong>Winner:</strong> <code>flood4 + tight 3%</code>. Zero defects on
+  the sparse case; on dense, 84 interior holes (tiny, fur-specked) and 37
+  residual magenta pixels (scattered subpixels, invisible in composites).
+</div>
+
+<h2>The winning one-liner</h2>
+
+<pre><code># Stage 1: flood-fill from the four corners (kills border-connected magenta only)
+W=$(magick identify -format "%w" input.webp)
+H=$(magick identify -format "%h" input.webp)
+magick input.webp -alpha set -fuzz 30% -fill none \
+  -draw "color 0,0 floodfill" -draw "color $((W-1)),0 floodfill" \
+  -draw "color 0,$((H-1)) floodfill" -draw "color $((W-1)),$((H-1)) floodfill" \
+  tmp.webp
+
+# Stage 2: tight-fuzz chroma pass (cleans up interior pockets without eating fur)
+magick tmp.webp -fuzz 3% -transparent "#FF00FF" out.webp</code></pre>
+
+<p>This is codified as a reusable step in the blog&rsquo;s
+<a href="https://github.com/idvorkin/chop-conventions/tree/main/skills/gen-image"><code>gen-image</code> skill</a>
+so every AI-generated character illustration goes through the same
+verified pipeline.</p>
+
+<h2>Reproducibility</h2>
+
+<pre><code>git clone https://github.com/idvorkin-ai-tools/chroma-key-explainer.git
+cd chroma-key-explainer
+./scripts/harness.sh     # requires `magick` and `uv` on PATH
+# writes results/&lt;image&gt;/&lt;approach&gt;.webp + -alpha.png + metrics.json</code></pre>
+
+<p>The <a href="https://github.com/idvorkin-ai-tools/chroma-key-explainer/blob/main/scripts/eval.py"><code>eval.py</code></a>
+script uses PEP&nbsp;723 inline deps and runs under <code>uv</code> with no
+pre-installation step.</p>
+
+<footer>
+  <p>
+    Built by <a href="https://github.com/idvorkin">idvorkin</a>.
+    Sibling explainers:
+    <a href="https://idvorkin-ai-tools.github.io/dolt-explainer/">dolt-explainer</a>
+    &middot;
+    <a href="https://idvorkin-ai-tools.github.io/monitor-explainer/">monitor-explainer</a>.
+    More at <a href="https://idvork.in/explainers">idvork.in/explainers</a>.
+  </p>
+</footer>
+
+</body>
+</html>

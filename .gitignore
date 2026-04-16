@@ -1,0 +1,2 @@
+# Harness scratch dir (tmp files during chroma pipeline stages)
+chroma-evals-tmp/
