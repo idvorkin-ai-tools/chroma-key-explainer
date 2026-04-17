@@ -36,7 +36,13 @@
   table.metrics tr.winner { background: #e8f5e9; font-weight: 600; }
   table.metrics tr.worst { color: #b00; }
 
-  .compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: .8rem; margin: 1rem 0; }
+  /* 2-column grid so sparse and dense always sit side-by-side for direct
+     visual comparison. 4-image blocks lay out as:
+       row 1: sparse-composite  |  dense-composite
+       row 2: sparse-alpha      |  dense-alpha
+     Collapses to single column only on very narrow viewports. */
+  .compare { display: grid; grid-template-columns: repeat(2, 1fr); gap: .8rem; margin: 1rem 0; }
+  @media (max-width: 520px) { .compare { grid-template-columns: 1fr; } }
   .compare figure { margin: 0; border: 1px solid #e4e4e4; border-radius: 6px; padding: .5rem; background: #fafafa; }
   .compare figure.alpha { background: #333; border-color: #333; }
   .compare figure.alpha figcaption { color: #ccc; }
@@ -93,6 +99,20 @@
 <body>
 
 <h1>Chroma-key hill-climbing</h1>
+
+<h2 style="margin-top:.5rem; color:#222; border:none;">The problem</h2>
+<blockquote style="font-style:italic; color:#333; border-left:4px solid #0969da; background:#f5faff; padding:.9rem 1.2rem; margin:.5rem 0 1rem 0; border-radius:0 6px 6px 0;">
+  I want illustrations of my raccoon character with a <strong>transparent
+  background</strong> so I can drop them onto blog posts, newsletters, and
+  dark-themed slides without a white box around the raccoon. The AI image
+  generator I use <strong>can&rsquo;t emit transparent PNGs directly</strong>.
+  The standard workaround is: render the raccoon on a solid
+  <code>#FF00FF</code> magenta background, then chroma-key that magenta out
+  locally. Easy &mdash; except that the naive
+  <code>-fuzz 30% -transparent #FF00FF</code> one-liner quietly produces
+  broken images, and the damage is invisible on a white preview. This page
+  is how I tuned the recipe.
+</blockquote>
 
 <div class="meta">
   <strong>What this is:</strong> a worked example of
@@ -257,6 +277,17 @@ mode a single eyeball on a single image won&rsquo;t.</p>
 black-and-white) are reported for regression-checking but don&rsquo;t drive
 the search.</p>
 
+<div class="aha">
+  <strong>The human doesn&rsquo;t climb the hill &mdash; the agent does.</strong>
+  My job ended at "here are the three numbers that measure success, and
+  here&rsquo;s how to weight them." From that point on, the coding agent
+  ran the harness, read the evals, proposed the next recipe, ran it, and
+  scored it &mdash; on loop until the climb plateaued. That&rsquo;s the
+  whole payoff of eval-driven work: once the fitness function is sharp,
+  the inner loop is no longer a human loop. I looked at the final result
+  and spot-checked the regressions; the agent did the search.
+</div>
+
 <h2>The hill-climb</h2>
 
 <p>Each row of the table below is one attempt, in the order they were
@@ -410,8 +441,8 @@ comparison (composite-on-white plus alpha mask for both test cases).</p>
 
   <div class="compare">
     <figure><img src="results/sparse/plain-on-white.webp" alt="sparse plain on white"><figcaption>sparse / on white</figcaption></figure>
-    <figure class="alpha"><img src="results/sparse/plain-alpha.png" alt="sparse plain alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure><img src="results/dense/plain-on-white.webp" alt="dense plain on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/plain-alpha.png" alt="sparse plain alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure class="alpha"><img src="results/dense/plain-alpha.png" alt="dense plain alpha"><figcaption>dense / alpha</figcaption></figure>
   </div>
 
@@ -443,8 +474,8 @@ comparison (composite-on-white plus alpha mask for both test cases).</p>
 
   <div class="compare">
     <figure><img src="results/sparse/flood4-on-white.webp" alt="sparse flood4 on white"><figcaption>sparse / on white</figcaption></figure>
-    <figure class="alpha"><img src="results/sparse/flood4-alpha.png" alt="sparse flood4 alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure><img src="results/dense/flood4-on-white.webp" alt="dense flood4 on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/flood4-alpha.png" alt="sparse flood4 alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure class="alpha"><img src="results/dense/flood4-alpha.png" alt="dense flood4 alpha"><figcaption>dense / alpha</figcaption></figure>
   </div>
 
@@ -474,8 +505,8 @@ comparison (composite-on-white plus alpha mask for both test cases).</p>
 
   <div class="compare">
     <figure><img src="results/sparse/flood4_then_tight_3-on-white.webp" alt="sparse f+t3 on white"><figcaption>sparse / on white</figcaption></figure>
-    <figure class="alpha"><img src="results/sparse/flood4_then_tight_3-alpha.png" alt="sparse f+t3 alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure><img src="results/dense/flood4_then_tight_3-on-white.webp" alt="dense f+t3 on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/flood4_then_tight_3-alpha.png" alt="sparse f+t3 alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure class="alpha"><img src="results/dense/flood4_then_tight_3-alpha.png" alt="dense f+t3 alpha"><figcaption>dense / alpha</figcaption></figure>
   </div>
 
@@ -503,8 +534,8 @@ comparison (composite-on-white plus alpha mask for both test cases).</p>
 
   <div class="compare">
     <figure><img src="results/sparse/flood4_then_tight_5-on-white.webp" alt="sparse f+t5 on white"><figcaption>sparse / on white</figcaption></figure>
-    <figure class="alpha"><img src="results/sparse/flood4_then_tight_5-alpha.png" alt="sparse f+t5 alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure><img src="results/dense/flood4_then_tight_5-on-white.webp" alt="dense f+t5 on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/flood4_then_tight_5-alpha.png" alt="sparse f+t5 alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure class="alpha"><img src="results/dense/flood4_then_tight_5-alpha.png" alt="dense f+t5 alpha"><figcaption>dense / alpha</figcaption></figure>
   </div>
 
@@ -528,8 +559,8 @@ comparison (composite-on-white plus alpha mask for both test cases).</p>
 
   <div class="compare">
     <figure><img src="results/sparse/flood4_then_tight_10-on-white.webp" alt="sparse f+t10 on white"><figcaption>sparse / on white</figcaption></figure>
-    <figure class="alpha"><img src="results/sparse/flood4_then_tight_10-alpha.png" alt="sparse f+t10 alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure><img src="results/dense/flood4_then_tight_10-on-white.webp" alt="dense f+t10 on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/flood4_then_tight_10-alpha.png" alt="sparse f+t10 alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure class="alpha"><img src="results/dense/flood4_then_tight_10-alpha.png" alt="dense f+t10 alpha"><figcaption>dense / alpha</figcaption></figure>
   </div>
 
@@ -565,8 +596,8 @@ magick input.webp alpha.png -compose CopyOpacity -composite out.webp</code></pre
 
   <div class="compare">
     <figure><img src="results/sparse/cc_border-on-white.webp" alt="sparse cc_border on white"><figcaption>sparse / on white</figcaption></figure>
-    <figure class="alpha"><img src="results/sparse/cc_border-alpha.png" alt="sparse cc_border alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure><img src="results/dense/cc_border-on-white.webp" alt="dense cc_border on white"><figcaption>dense / on white</figcaption></figure>
+    <figure class="alpha"><img src="results/sparse/cc_border-alpha.png" alt="sparse cc_border alpha"><figcaption>sparse / alpha</figcaption></figure>
     <figure class="alpha"><img src="results/dense/cc_border-alpha.png" alt="dense cc_border alpha"><figcaption>dense / alpha</figcaption></figure>
   </div>
 
@@ -596,7 +627,13 @@ pre-installation step.</p>
 <p>The winning recipe is codified as a reusable step in the blog&rsquo;s
 <a href="https://github.com/idvorkin/chop-conventions/tree/main/skills/gen-image"><code>gen-image</code> skill</a>
 so every AI-generated character illustration goes through the same
-verified pipeline.</p>
+verified pipeline &mdash; <strong>and the skill now runs <code>eval.py</code>
+automatically at the end of every generation</strong>. Each image ships
+with a metrics card (residual, holes, fringe); if a future model update
+or prompt tweak regresses any of those numbers, the deviation is flagged
+on the spot instead of being discovered weeks later when someone notices
+pinholes in a dark-mode render. The hill-climb proved the recipe once;
+the auto-eval keeps it honest every time.</p>
 
 <footer>
   <p>
